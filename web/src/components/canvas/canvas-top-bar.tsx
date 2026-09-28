@@ -50,7 +50,7 @@ export function CanvasTopBar({
     onUndo: () => void;
     onRedo: () => void;
     agentOpen: boolean;
-    compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
+    compactAgentStatus: { connected: boolean; enabled: boolean; activity: string; workspacePath: string };
     onToggleAgent: () => void;
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
@@ -180,17 +180,36 @@ function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {
     );
 }
 
-function CompactAgentStatus({ status, onClick }: { status: { connected: boolean; enabled: boolean; activity: string }; onClick: () => void }) {
+function CompactAgentStatus({ status, onClick }: { status: { connected: boolean; enabled: boolean; activity: string; workspacePath: string }; onClick: () => void }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
     const label = status.connected ? "Codex 已连接" : status.enabled ? `Codex ${status.activity || "连接中"}` : "Codex 未连接";
+    const projectName = status.connected ? getWorkspaceName(status.workspacePath) : "";
     const dotColor = status.connected ? "#22c55e" : status.enabled ? "#f59e0b" : theme.node.muted;
     return (
-        <button type="button" className="flex h-8 items-center gap-1.5 text-xs transition hover:opacity-75" style={{ color: status.connected ? "#16a34a" : status.enabled ? "#d97706" : theme.node.muted }} onClick={onClick} title="打开本地 Codex 面板">
+        <button
+            type="button"
+            className="flex h-8 min-w-0 items-center gap-1.5 text-xs transition hover:opacity-75"
+            onClick={onClick}
+            title={projectName ? `当前 Codex 项目：${projectName}\n${status.workspacePath}\n点击打开本地 Codex 面板` : "打开本地 Codex 面板"}
+        >
             <span className="size-2 rounded-full" style={{ background: dotColor }} />
-            <span className="max-w-[140px] truncate">{label}</span>
+            <span className="shrink-0" style={{ color: status.connected ? "#16a34a" : status.enabled ? "#d97706" : theme.node.muted }}>
+                {label}
+            </span>
+            {projectName ? (
+                <>
+                    <span aria-hidden style={{ color: theme.node.faint }}>·</span>
+                    <span className="max-w-[160px] truncate" style={{ color: theme.node.muted }}>{projectName}</span>
+                </>
+            ) : null}
         </button>
     );
+}
+
+function getWorkspaceName(workspacePath: string) {
+    const parts = workspacePath.trim().replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || "";
 }
 
 function Shortcut({ keys, value }: { keys: string[]; value: string }) {

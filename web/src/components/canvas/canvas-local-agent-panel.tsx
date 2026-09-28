@@ -48,8 +48,9 @@ type AgentThreadsResponse = { ok?: boolean; workspace?: AgentWorkspace; data?: A
 type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; thread?: AgentThreadSummary; messages?: AgentChatItem[] };
 type AgentConfigResponse = { ok?: boolean; url?: string; token?: string; hasToken?: boolean };
 type AgentCodexState = { busy?: boolean; threadId?: string; turnId?: string };
-type AgentHelloEvent = { ok?: boolean; clientId?: string; codex?: AgentCodexState };
+type AgentHelloEvent = { ok?: boolean; clientId?: string; codex?: AgentCodexState; codexWorkspacePath?: string };
 type AgentWorkspaceEvent = { activeThreadId?: string; threadId?: string; emptyThread?: boolean };
+type AgentCodexWorkspaceEvent = { workspacePath?: string };
 type AgentChatEvent = { threadId?: string; sourceClientId?: string; message?: AgentChatItem };
 
 export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean }) {
@@ -183,10 +184,11 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         };
         const source = new EventSource(`${endpoint}/events?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
         source.addEventListener("hello", (event) => {
-            const busy = Boolean(parseEventData<AgentHelloEvent>(event)?.codex?.busy);
+            const data = parseEventData<AgentHelloEvent>(event);
+            const busy = Boolean(data?.codex?.busy);
             errorLoggedRef.current = false;
             connectedRef.current = true;
-            setAgentState({ connected: true, activity: busy ? "Codex 正在运行" : "已连接", waiting: busy, sending: false, connectError: "", silentConnect: false, messages: useAgentStore.getState().messages.filter((item) => !isConnectionErrorMessage(item)) });
+            setAgentState({ connected: true, codexWorkspacePath: data?.codexWorkspacePath || "", activity: busy ? "Codex 正在运行" : "已连接", waiting: busy, sending: false, connectError: "", silentConnect: false, messages: useAgentStore.getState().messages.filter((item) => !isConnectionErrorMessage(item)) });
             if (!headless) message.success("本地 Agent 已连接");
             void postState(endpoint, token, clientId, canvasContextRef.current?.snapshot || null);
             if (document.visibilityState === "visible" && document.hasFocus()) void activateAgentClient(endpoint, token, clientId);
@@ -199,6 +201,10 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
                 setAgentState({ activity: busy ? "Codex 正在运行" : "完成", waiting: busy, ...(busy ? {} : { sending: false }) });
                 if (!busy) await loadThreads();
             });
+        });
+        source.addEventListener("codex_workspace", (event) => {
+            const data = parseEventData<AgentCodexWorkspaceEvent>(event);
+            if (data?.workspacePath) setAgentState({ codexWorkspacePath: data.workspacePath });
         });
         source.addEventListener("tool_call", (event) => {
             const data = parseEventData<AgentPendingToolCall>(event);
@@ -517,6 +523,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
             threads: [],
             activeThreadId: "",
             workspacePath: "",
+            codexWorkspacePath: "",
             loadingThreads: false,
             waiting: false,
             sending: false,

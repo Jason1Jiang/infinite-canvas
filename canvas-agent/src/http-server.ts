@@ -57,7 +57,14 @@ export function startHttpServer() {
         res.setHeader("Cache-Control", "no-store");
         res.type(attachment.type).send(Buffer.from(data, "base64"));
     }));
-    app.post("/api/tools", route(async (req, res) => res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) })));
+    app.post("/mcp/connect", (req, res) => {
+        session.setCodexWorkspacePath(String(req.body?.workspacePath || ""));
+        res.json({ ok: true });
+    });
+    app.post("/api/tools", route(async (req, res) => {
+        session.setCodexWorkspacePath(String(req.body?.workspacePath || ""));
+        res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) });
+    }));
     app.get("/agent/codex/workspace", (_req, res) => {
         const workspace = ensureSiteWorkspace(config);
         res.json({ ok: true, workspace });
@@ -105,6 +112,7 @@ export function startHttpServer() {
         if (session.codexBusy) return res.status(409).json({ ok: false, error: "Codex 正在运行，请等待当前任务完成" });
         const attachments = Array.isArray(req.body?.attachments) ? (req.body.attachments as AgentAttachment[]) : [];
         const workspace = ensureSiteWorkspace(config);
+        session.setCodexWorkspacePath(workspace.workspacePath);
         const prompt = String(req.body?.prompt || "");
         if (!prompt.trim()) return res.status(400).json({ ok: false, error: "请输入任务内容" });
         const clientId = String(req.body?.clientId || "");

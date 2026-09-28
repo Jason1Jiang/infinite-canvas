@@ -1,6 +1,6 @@
 {
   "name": "@basketikun/canvas-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "dev": "tsx src/index.ts",
-    "test": "tsx --test src/canvas-session.test.ts",
+    "test": "tsx --test src/canvas-session.test.ts test/*.test.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "prepack": "npm run build"

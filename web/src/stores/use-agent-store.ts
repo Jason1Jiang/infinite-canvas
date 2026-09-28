@@ -35,6 +35,7 @@ type AgentStore = {
     threads: AgentThreadSummary[];
     activeThreadId: string;
     workspacePath: string;
+    codexWorkspacePath: string;
     loadingThreads: boolean;
     activeTab: AgentPanelTab;
     confirmTools: boolean;
@@ -75,9 +76,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     threads: [],
     activeThreadId: "",
     workspacePath: "",
+    codexWorkspacePath: "",
     loadingThreads: false,
     activeTab: "setup",
-    confirmTools: true,
+    confirmTools: false,
     activity: "就绪",
     connectError: "",
     pendingTool: null,
