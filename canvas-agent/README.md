@@ -110,11 +110,18 @@ default_tools_approval_mode = "approve"
 可用工具：
 
 - `canvas_get_state`
+- `canvas_get_nodes`
 - `canvas_get_selection`
 - `canvas_export_snapshot`
 - `canvas_apply_ops`
 - `canvas_create_text_node`
 - `canvas_create_image_prompt_flow`
+- `assets_get`
+- `assets_add`
+
+`canvas_get_state` 返回有体积上限的画布摘要，不包含内联媒体数据。生成轮询或增量检查请使用 `canvas_get_nodes` 按节点 ID、类型和状态定向查询；写操作只返回节点 ID 等轻量回执。
+
+本地图片优先通过 `assets_add.localFilePath` 登记到「我的素材」，再把返回的素材 ID 传给 `canvas_create_node.assetId` 创建图片节点。路径必须位于当前 Codex 工作区内，支持 PNG、JPEG、WebP、GIF 和 AVIF，单文件上限 20MB；兼容入口 `assets_add.imageUrl` 仍然保留。这样图片内容只在本机 Agent 与网页之间传输，不会作为 dataURL 写入 Codex 会话。
 
 `canvas_apply_ops` 示例：
 

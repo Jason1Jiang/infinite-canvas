@@ -1,11 +1,13 @@
 import crypto from "node:crypto";
+import { readFile, realpath, stat } from "node:fs/promises";
+import path from "node:path";
 import type { ServerResponse } from "node:http";
 
 import type { AgentAttachment } from "../agent/types.js";
 import { logger } from "../utils/logger.js";
 import { buildCanvasToolRequest, fitAttachmentNodeSize } from "./operations.js";
 import type { ToolName } from "./schemas.js";
-import { compactCanvasState, compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
+import { compactCanvasMutationResult, compactCanvasState, isToolName, nextCanvasX, parseToolInput, queryCanvasNodes } from "./tools.js";
 import type { CanvasSnapshot } from "./types.js";
 
 type PendingRequest = { clientId: string; resolve: (value: unknown) => void; reject: (error: Error) => void };
@@ -25,6 +27,8 @@ export type ConversationState = {
 type McpInventoryItem = { name: string; authStatus?: string };
 export const AGENT_PROTOCOL_VERSION = 6;
 
+const MAX_LOCAL_IMAGE_BYTES = 20 * 1024 * 1024;
+
 const SITE_TOOLS = new Set<ToolName>([
     "site_navigate",
     "canvas_list_projects",
@@ -34,6 +38,7 @@ const SITE_TOOLS = new Set<ToolName>([
     "workbench_video_generate",
     "prompts_search",
     "assets_list",
+    "assets_get",
     "assets_add",
     "generation_get_status",
 ]);
@@ -51,6 +56,7 @@ export class CanvasSession {
     private codexMutationBusy = false;
     private activeClientId = "";
     private boundClientId = "";
+    private codexWorkspacePath = "";
     private focusSequence = 0;
     private codexState: CodexState = { busy: false, threadId: "", turnId: "" };
     private conversationState: ConversationState;
@@ -279,7 +285,7 @@ export class CanvasSession {
                 this.clientFocusOrder.set(clientId, ++this.focusSequence);
             }
         }
-        sendEvent(res, "hello", { ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals });
+        sendEvent(res, "hello", { codexWorkspacePath: this.codexWorkspacePath, ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals });
         if (!statusOnly && activeThreadId && this.codexState.threadId === activeThreadId) this.codexReplayEvents.forEach((event) => sendEvent(res, event.type, event.payload));
         const timer = setInterval(() => sendEvent(res, "ping", { time: Date.now() }), 15000);
         res.on("close", () => {
@@ -436,24 +442,62 @@ export class CanvasSession {
         });
     }
 
+    setCodexWorkspacePath(workspacePath: string) {
+        const next = workspacePath.trim();
+        if (!next || next === this.codexWorkspacePath) return;
+        this.codexWorkspacePath = next;
+        this.emitAll("codex_workspace", { workspacePath: next });
+    }
+
     /** 校验工具参数并将调用分派到当前目标网页。 */
     async callTool(name: unknown, rawInput: unknown) {
         if (!isToolName(name)) throw new Error(`未知工具：${String(name)}`);
         logger.info("MCP tool called", { name, input: rawInput, targetClientId: this.targetClientId });
-        const input = parseToolInput(name, rawInput) as Record<string, unknown>;
+        let input = parseToolInput(name, rawInput) as Record<string, unknown>;
+        if (name === "assets_add" && input.localFilePath) {
+            if (input.kind !== "image") throw new Error("localFilePath 仅支持图片素材");
+            input = { ...input, imageUrl: await localImageDataUrl(String(input.localFilePath), this.codexWorkspacePath) };
+            delete input.localFilePath;
+        }
+
         if (SITE_TOOLS.has(name)) {
             if (!this.clients.size) throw new Error("当前没有已连接网页");
-            return await this.requestCanvasTool(name, input);
+            const result = await this.requestCanvasTool(name, input);
+            if (name === "assets_get") {
+                const asset = recordValue(result);
+                const { coverUrl, ...metadata } = asset;
+                return typeof coverUrl === "string" && !/^(?:data|blob):/i.test(coverUrl)
+                    ? { ...metadata, coverUrl }
+                    : metadata;
+            }
+            return result;
         }
-        const readTool = ["canvas_get_state", "canvas_get_selection", "canvas_export_snapshot"].includes(name);
+        const readTool = ["canvas_get_state", "canvas_get_nodes", "canvas_get_selection", "canvas_export_snapshot"].includes(name);
         if (readTool && (!this.clients.size || !this.canvasState)) throw new Error("当前没有已连接画布");
         if (name === "canvas_get_state" || name === "canvas_export_snapshot") return compactCanvasState(this.canvasState);
+        if (name === "canvas_get_nodes") return queryCanvasNodes(this.canvasState, input);
         if (name === "canvas_get_selection") {
-            const ids = new Set(this.canvasState?.selectedNodeIds || []);
-            return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };
+            return queryCanvasNodes(this.canvasState, { ids: this.canvasState?.selectedNodeIds || [], limit: 100 });
         }
         if (name === "canvas_create_attachment_nodes") return await this.createAttachmentNodes(input as { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" });
         if (!this.clients.size) throw new Error("当前没有已连接画布");
+        if (name === "canvas_create_node" && input.assetId) {
+            if (input.nodeType !== "image") throw new Error("assetId 仅支持创建图片节点");
+            const asset = await this.requestCanvasTool("assets_get", { id: input.assetId }) as Record<string, unknown>;
+            if (asset.kind !== "image") throw new Error("指定素材不是图片");
+            const naturalWidth = Number(asset.width) > 0 ? Number(asset.width) : 512;
+            const naturalHeight = Number(asset.height) > 0 ? Number(asset.height) : 512;
+            const fitted = fitAttachmentNodeSize(naturalWidth, naturalHeight);
+            input = {
+                ...input,
+                width: input.width ?? fitted.width,
+                height: input.height ?? fitted.height,
+                metadata: {
+                    ...recordValue(input.metadata), content: asset.coverUrl, storageKey: asset.storageKey,
+                    status: "success", naturalWidth, naturalHeight, bytes: asset.bytes, mimeType: asset.mimeType,
+                },
+            };
+        }
         const request = buildCanvasToolRequest(name, input, this.canvasState);
         return await this.requestCanvasTool(request.name, request.input);
     }
@@ -491,9 +535,10 @@ export class CanvasSession {
         const clientId = this.targetClientId;
         const client = this.clients.get(clientId);
         if (!client) throw new Error("当前没有已连接画布");
+        const beforeState = this.canvasState;
         sendEvent(client, "tool_call", { requestId, name, input });
         logger.debug("Canvas tool request sent", { requestId, name, input, clientId });
-        return await new Promise((resolve, reject) => {
+        const result = await new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pending.delete(requestId);
                 logger.warn("Canvas tool request timed out", { requestId, name, clientId });
@@ -501,6 +546,7 @@ export class CanvasSession {
             }, 30000);
             this.pending.set(requestId, { clientId, resolve: (value) => (clearTimeout(timer), resolve(value)), reject: (error) => (clearTimeout(timer), reject(error)) });
         });
+        return name === "canvas_apply_ops" ? compactCanvasMutationResult(input, result, beforeState) : result;
     }
 }
 
@@ -537,4 +583,27 @@ function sendEvent(res: ServerResponse, type: string, payload: unknown) {
 function positiveNumber(value: unknown, fallback: number) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+async function localImageDataUrl(filePath: string, workspacePath: string) {
+    if (!workspacePath) throw new Error("尚未获取 Codex 工作区，无法读取本地图片");
+    const [workspace, file] = await Promise.all([realpath(workspacePath), realpath(filePath)]);
+    const relative = path.relative(workspace, file);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("本地图片必须位于当前 Codex 工作区内");
+    const info = await stat(file);
+    if (!info.isFile()) throw new Error("本地图片路径不是文件");
+    if (info.size > MAX_LOCAL_IMAGE_BYTES) throw new Error("本地图片不能超过 20MB");
+    const mimeType = imageMimeType(file);
+    if (!mimeType) throw new Error("仅支持 PNG、JPEG、WebP、GIF 或 AVIF 图片");
+    return `data:${mimeType};base64,${(await readFile(file)).toString("base64")}`;
+}
+
+function imageMimeType(filePath: string) {
+    const extension = path.extname(filePath).toLowerCase();
+    if (extension === ".png") return "image/png";
+    if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+    if (extension === ".webp") return "image/webp";
+    if (extension === ".gif") return "image/gif";
+    if (extension === ".avif") return "image/avif";
+    return "";
 }

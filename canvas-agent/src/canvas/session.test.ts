@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { ServerResponse } from "node:http";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -59,7 +62,7 @@ test("画布写操作只发送给当前激活网页", async (t) => {
     assert.equal(first.event("tool_call"), undefined);
     assert.equal(field(call, "name"), "canvas_apply_ops");
     session.resolveResult("second", { requestId: String(field(call, "requestId")), result: { ok: true } });
-    assert.deepEqual(await result, { ok: true });
+    assert.equal(field(await result, "appliedOpCount"), 1);
 });
 
 test("当前 turn 的图片附件可在发起标签页画布创建图片节点", async (t) => {
@@ -125,7 +128,7 @@ test("tool result is accepted only from the request client", async (t) => {
 
     assert.equal(session.resolveResult("second", { requestId, result: { client: "second" } }), false);
     assert.equal(session.resolveResult("first", { requestId, result: { client: "first" } }), true);
-    assert.deepEqual(await result, { client: "first" });
+    assert.equal(field(await result, "appliedOpCount"), 1);
 });
 
 test("生成状态查询由当前激活网页返回", async (t) => {
@@ -350,7 +353,7 @@ test("a bound client remains the tool target while focus changes", async (t) => 
     const call = first.event("tool_call");
     assert.equal(second.event("tool_call"), undefined);
     session.resolveResult("first", { requestId: String(field(call, "requestId")), result: { ok: true } });
-    assert.deepEqual(await result, { ok: true });
+    assert.equal(field(await result, "appliedOpCount"), 1);
 
     session.releaseClient("first");
     assert.equal(field(await session.callTool("canvas_get_state", {}), "projectId"), "canvas-second");
@@ -382,7 +385,7 @@ test("a disconnected bound client never falls back and can resume with the same 
     const call = reconnected.event("tool_call");
     assert.equal(second.event("tool_call"), undefined);
     session.resolveResult("first", { requestId: String(field(call, "requestId")), result: { ok: true } });
-    assert.deepEqual(await result, { ok: true });
+    assert.equal(field(await result, "appliedOpCount"), 1);
 });
 
 test("新连接会回放当前运行 turn 的最新事件快照", (t) => {
@@ -563,8 +566,8 @@ class FakeSseResponse extends EventEmitter {
     }
 
     /** 读取指定类型的首个 SSE 事件数据。 */
-    event(type: string) {
-        return this.events(type)[0];
+    event(type: string, index = 0) {
+        return this.events(type)[index];
     }
 
     /** 读取指定类型的全部 SSE 事件数据。 */
@@ -577,7 +580,95 @@ class FakeSseResponse extends EventEmitter {
     }
 
     /** 触发连接关闭事件。 */
+    async waitForEvent(type: string, eventIndex = 0) {
+        for (let index = 0; index < 50; index += 1) {
+            const value = this.event(type, eventIndex);
+            if (value !== undefined) return value;
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        return undefined;
+    }
+
     close() {
         this.emit("close");
     }
 }
+
+test("本地图片路径可短参数导入我的素材", async (t) => {
+    const workspace = await mkdtemp(path.join(tmpdir(), "canvas-agent-local-image-"));
+    t.after(async () => rm(workspace, { recursive: true, force: true }));
+    const imagePath = path.join(workspace, "sample.png");
+    await writeFile(imagePath, Buffer.from("iVBORw0KGgo=", "base64"));
+
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    t.after(() => first.close());
+    session.setCodexWorkspacePath(workspace);
+
+    const result = session.callTool("assets_add", { kind: "image", title: "本地样例", localFilePath: imagePath });
+    const call = await first.waitForEvent("tool_call");
+    const input = field(call, "input") as Record<string, unknown>;
+    assert.equal(field(call, "name"), "assets_add");
+    assert.equal("localFilePath" in input, false);
+    assert.match(String(input.imageUrl), /^data:image\/png;base64,/);
+
+    session.resolveResult("first", { requestId: String(field(call, "requestId")), result: { ok: true, id: "asset-1", kind: "image" } });
+    assert.deepEqual(await result, { ok: true, id: "asset-1", kind: "image" });
+});
+
+test("本地图片路径不能越过当前 Codex 工作区", async (t) => {
+    const workspace = await mkdtemp(path.join(tmpdir(), "canvas-agent-workspace-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "canvas-agent-outside-"));
+    t.after(async () => Promise.all([rm(workspace, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
+    const imagePath = path.join(outside, "sample.png");
+    await writeFile(imagePath, Buffer.from("iVBORw0KGgo=", "base64"));
+
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    t.after(() => first.close());
+    session.setCodexWorkspacePath(workspace);
+
+    await assert.rejects(session.callTool("assets_add", { kind: "image", title: "越界样例", localFilePath: imagePath }), /当前 Codex 工作区/);
+    assert.equal(first.event("tool_call"), undefined);
+});
+
+test("素材 ID 可创建不含内联图片的画布节点", async (t) => {
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    t.after(() => first.close());
+    session.updateState(snapshot("canvas-first"), "first");
+
+    const result = session.callTool("canvas_create_node", { nodeType: "image", assetId: "asset-1", title: "素材节点", x: 100, y: 200 });
+    const assetCall = await first.waitForEvent("tool_call", 0);
+    assert.equal(field(assetCall, "name"), "assets_get");
+    assert.deepEqual(field(assetCall, "input"), { id: "asset-1" });
+    session.resolveResult("first", {
+        requestId: String(field(assetCall, "requestId")),
+        result: { id: "asset-1", kind: "image", title: "素材", coverUrl: "blob:asset-1", storageKey: "image:key-1", width: 1200, height: 600, bytes: 1000, mimeType: "image/png" },
+    });
+
+    const canvasCall = await first.waitForEvent("tool_call", 1);
+    const input = field(canvasCall, "input") as { ops: Array<Record<string, unknown>> };
+    const op = input.ops[0];
+    assert.equal(field(canvasCall, "name"), "canvas_apply_ops");
+    assert.equal(op.width, 640);
+    assert.equal(op.height, 320);
+    assert.deepEqual(op.metadata, { content: "blob:asset-1", storageKey: "image:key-1", status: "success", naturalWidth: 1200, naturalHeight: 600, bytes: 1000, mimeType: "image/png" });
+    assert.ok(!JSON.stringify(input).includes("data:image"));
+
+    session.resolveResult("first", { requestId: String(field(canvasCall, "requestId")), result: { ok: true } });
+    assert.equal(field(await result, "appliedOpCount"), 1);
+});
+
+test("素材读取不把内联图片回传到 MCP 会话", async (t) => {
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    t.after(() => first.close());
+    const result = session.callTool("assets_get", { id: "asset-1" });
+    const call = first.event("tool_call");
+    session.resolveResult("first", {
+        requestId: String(field(call, "requestId")),
+        result: { id: "asset-1", kind: "image", coverUrl: "data:image/png;base64,AAAA", width: 100 },
+    });
+    assert.deepEqual(await result, { id: "asset-1", kind: "image", width: 100 });
+});

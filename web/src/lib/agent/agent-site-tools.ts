@@ -24,6 +24,7 @@ export const SITE_TOOL_NAMES = [
     "workbench_video_generate",
     "prompts_search",
     "assets_list",
+    "assets_get",
     "assets_add",
 ] as const;
 
@@ -45,6 +46,7 @@ export const SITE_TOOL_LABELS: Record<SiteToolName, string> = {
     get workbench_video_get_config() { return siteText("videoConfig"); },
     get workbench_video_generate() { return siteText("videoGenerate"); },
     get prompts_search() { return siteText("promptSearch"); },
+    get assets_get() { return siteText("assetGet"); },
     get assets_list() { return siteText("assetList"); },
     get assets_add() { return siteText("assetAdd"); },
 };
@@ -72,6 +74,8 @@ export async function runSiteTool(name: SiteToolName, input: SiteToolInput, navi
             return searchPrompts(input);
         case "assets_list":
             return listAssets(input);
+        case "assets_get":
+            return getAsset(input);
         case "assets_add":
             return addAsset(input);
         default:
@@ -291,6 +295,17 @@ function listAssets(input: SiteToolInput) {
         content: asset.kind === "text" ? asset.data.content : undefined,
     }));
     return { total: filtered.length, page, pageSize, items };
+}
+
+function getAsset(input: SiteToolInput) {
+    const { assets, hydrated } = useAssetStore.getState();
+    if (!hydrated) throw new Error("资产还在加载中，请稍后重试");
+    const id = String(input.id || "").trim();
+    const asset = assets.find((item) => item.id === id);
+    if (!asset) throw new Error(`找不到素材：${id}`);
+    if (asset.kind === "image") return { id: asset.id, kind: asset.kind, title: asset.title, coverUrl: asset.data.dataUrl || asset.coverUrl, storageKey: asset.data.storageKey, width: asset.data.width, height: asset.data.height, bytes: asset.data.bytes, mimeType: asset.data.mimeType };
+    if (asset.kind === "text") return { id: asset.id, kind: asset.kind, title: asset.title, content: asset.data.content };
+    return { id: asset.id, kind: asset.kind, title: asset.title, coverUrl: asset.coverUrl, storageKey: asset.data.storageKey, width: asset.data.width, height: asset.data.height, bytes: asset.data.bytes, mimeType: asset.data.mimeType };
 }
 
 async function addAsset(input: SiteToolInput) {

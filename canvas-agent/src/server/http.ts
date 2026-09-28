@@ -169,7 +169,14 @@ export function startHttpServer() {
         res.setHeader("Cache-Control", "no-store");
         res.type(path.extname(filePath)).send(await readFile(filePath));
     }));
-    app.post("/api/tools", route(async (req, res) => res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) })));
+    app.post("/mcp/connect", (req, res) => {
+        session.setCodexWorkspacePath(String(req.body?.workspacePath || ""));
+        res.json({ ok: true });
+    });
+    app.post("/api/tools", route(async (req, res) => {
+        session.setCodexWorkspacePath(String(req.body?.workspacePath || ""));
+        res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) });
+    }));
     app.get("/agent/codex/workspace", (_req, res) => {
         const workspace = ensureSiteWorkspace(config);
         res.json({ ok: true, workspace, conversation: session.conversationStateSnapshot });
@@ -340,6 +347,7 @@ export function startHttpServer() {
                     ...(sourceClientId ? { sourceClientId } : {}),
                 });
             };
+            session.setCodexWorkspacePath(workspace.workspacePath);
             void runCodexTurn(withAttachmentContext(prompt, attachmentRefs), lifecycleEmit, attachments, {
                 threadId,
                 cwd: workspace.workspacePath,
